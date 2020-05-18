@@ -198,10 +198,10 @@ task python
 
         # Determine the command
         if config.use_mpiexec:
-            nwchemrec["command"] = create_mpi_invocation(which("nwchem"), config)
+            nwchemrec["command"] = ["mpirun -np 10 "+ which("nwchem")]
             logger.info(f"Launching with mpiexec: {' '.join(nwchemrec['command'])}")
         else:
-            nwchemrec["command"] = [which("nwchem")]
+            nwchemrec["command"] = ["mpirun -np 10 "+ which("nwchem")]
 
         return nwchemrec
 
