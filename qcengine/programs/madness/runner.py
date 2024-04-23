@@ -69,51 +69,43 @@ class MadnessHarness(ProgramHarness):
 
         """
         qc = which(
-            "moldft",
+            "mad-dft",
             return_bool=True,
             raise_error=raise_error,
             raise_msg="Please install via https://github.com/m-a-d-n-e-s-s/madness",
         )
-        #         dep = which_import(
-        #             "networkx",
-        #             return_bool=True,
-        #             raise_error=raise_error,
-        #             raise_msg="For NWChem harness, please install via `conda install networkx -c conda-forge`.",
-        #         )
-        return qc  # and dep
+        return bool(qc)  # and dep
 
     ## gotta figure out which input file and from where
     def get_version(self) -> str:
-        self.found(raise_error=True)
 
+        if self.found(raise_error=True):
         # Get the node configuration
-        config = get_config()
+            config = get_config()
 
-        # Run MADNESS
-        which_prog = which("moldft")
+            # Run MADNESS
+            which_prog = which("mad-dft")
+            which_prog=str(which_prog)
 
-        if config.use_mpiexec:
-            command = create_mpi_invocation(which_prog, config)
-        else:
-            command = [which_prog]
-        command.append("v.moldft")
+            if config.use_mpiexec:
+                command = create_mpi_invocation(str(which_prog), config)
+            else:
+                command = [which_prog]
 
-        if which_prog not in self.version_cache:
-            success, output = execute(
-                command,
-                {"v.moldft": "dft\nxc lda\nend\ngeometry\nH  0.0 0.0 0.0\nH  0.7 0.0 0.0\nend\n"},
-                scratch_directory=config.scratch_directory,
-            )
+            if which_prog not in self.version_cache:
+                success, output = execute(
+                    command,
+                    infiles=None,
+                    scratch_directory=config.scratch_directory,
+                )
 
-            if success:
                 for line in output["stdout"].splitlines():
                     if "multiresolution suite" in line:
                         version = line.strip().split()[1]
                         self.version_cache[which_prog] = safe_version(version)
-            else:
-                raise UnknownError(output["stderr"])
-
-        return self.version_cache[which_prog]
+            return str(self.version_cache[which_prog])
+        else:
+            raise ModuleNotFoundError("MADNESS executable not found.")
 
     def compute(self, input_model: "AtomicInput", config: "TaskConfig") -> "AtomicResult":
         """
