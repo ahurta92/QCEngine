@@ -1,6 +1,6 @@
+""" Calls the Madness moldft executable.
 """
-Calls the Madness moldft executable.
-"""
+
 # import re
 import copy
 import json
@@ -10,7 +10,6 @@ from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 from pathlib import Path
 
-import numpy as np
 import qcelemental as qcel
 from qcelemental.models import AtomicResult, Provenance, AtomicInput
 from qcelemental.util import safe_version, which
@@ -19,12 +18,10 @@ from qcengine.config import TaskConfig, get_config
 from qcengine.exceptions import UnknownError
 
 from ...exceptions import InputError
-from ...util import execute, create_mpi_invocation
 from ..model import ProgramHarness
 
-from .germinate import muster_modelchem
-from .harvester import extract_formatted_properties, harvest
-from .keywords import format_keywords
+from .harvester import harvest_scf_info, harvest_calc_info
+from ...util import create_mpi_invocation, execute
 
 pp = pprint.PrettyPrinter(width=120, compact=True, indent=1)
 logger = logging.getLogger(__name__)
@@ -78,32 +75,25 @@ class MadnessHarness(ProgramHarness):
 
     ## gotta figure out which input file and from where
     def get_version(self) -> str:
-
         if self.found(raise_error=True):
-        # Get the node configuration
             config = get_config()
-
-            # Run MADNESS
-            which_prog = which("mad-dft")
-            which_prog=str(which_prog)
-
+            which_prog = str(which("mad-dft"))
             if config.use_mpiexec:
                 command = create_mpi_invocation(str(which_prog), config)
             else:
                 command = [which_prog]
-
             if which_prog not in self.version_cache:
                 success, output = execute(
                     command,
                     infiles=None,
                     scratch_directory=config.scratch_directory,
                 )
-
                 for line in output["stdout"].splitlines():
                     if "multiresolution suite" in line:
                         version = line.strip().split()[1]
+                        print("version", version)
                         self.version_cache[which_prog] = safe_version(version)
-            return str(self.version_cache[which_prog])
+                return str(self.version_cache[which_prog])
         else:
             raise ModuleNotFoundError("MADNESS executable not found.")
 
@@ -114,35 +104,65 @@ class MadnessHarness(ProgramHarness):
         self.found(raise_error=True)
 
         job_inputs = self.build_input(input_model, config)
-        success, output = self.execute(job_inputs, extra_outfiles=["calc_info.json"])
-        if "There is an error in the input file" in output["moldft"]["stdout"]:
-            raise InputError(output["moldft"]["stdout"])
-        if "not compiled" in output["moldft"]["stdout"]:
-            # recoverable with a different compilation with optional modules
-            raise InputError(output["moldft"]["stdout"])
-        if success:
-            num_commands = len(output)
-            if num_commands == 2:
-                stdin = job_inputs["infiles"]["moldft"]["input"]
-                output["moldft"]["outfiles"]["stdout"] = output["moldft"]["stdout"]
-                output["moldft"]["outfiles"]["stderr"] = output["moldft"]["stderr"]
-                output["molresponse"]["outfiles"]["stdout"] = output["molresponse"]["stdout"]
-                output["molresponse"]["outfiles"]["stderr"] = output["molresponse"]["stderr"]
 
-            else:
-                stdin = job_inputs["infiles"]["moldft"]["input"]
-                output["moldft"]["outfiles"]["stdout"] = output["moldft"]["stdout"]
-                output["moldft"]["outfiles"]["stderr"] = output["moldft"]["stderr"]
-                output["moldft"]["outfiles"]["input"] = stdin
-            return self.parse_output(output, input_model)
+        tmpdir = config.scratch_directory
+
+        success, output = execute(
+            job_inputs["commands"],
+            job_inputs["infiles"],
+            outfiles=["calc_path.json"],
+            scratch_directory=tmpdir,
+            scratch_messy=True,
+            scratch_exist_ok=True,
+        )
+
+        def collect_output_jsons(calc_path_json, output_dir):
+            # first print calc_path_json
+            print("calc_path_json: ", calc_path_json)
+            calc_path_json = json.loads(calc_path_json)
+            # first get calc_info and scf_info
+            calc_info_path = Path(output_dir) / calc_path_json["moldft"]["outfiles"]["calc_info"]
+            scf_info_path = Path(output_dir) / calc_path_json["moldft"]["outfiles"]["scf_info"]
+
+            with open(calc_info_path) as file:
+                calc_info_json = json.load(file)
+            with open(scf_info_path) as file:
+                scf_info_json = json.load(file)
+
+            output_json = {}
+            output_json["moldft"] = {}
+            output_json["moldft"]["calc_info"] = calc_info_json
+            output_json["moldft"]["scf_info"] = scf_info_json
+
+            # now get the response
+            if calc_path_json["response"]["calc_dirs"] is not None:
+                for response_base, response_calc in zip(
+                    calc_path_json["response"]["outfiles"], calc_path_json["response"]["calc_dirs"]
+                ):
+                    print(response_base, response_calc)
+                    dir_path = Path(response_calc).stem
+                    print(dir_path)
+                    response_base_path = output_dir / response_base
+                    output_json["response"] = {}
+                    with open(response_base_path) as file:
+                        output_json["response"][dir_path] = json.load(file)
+            return output_json
+
+        if success:
+            output_dir = output["scratch_directory"]
+            output_json = collect_output_jsons(output["outfiles"]["calc_path.json"], output_dir)
+            output_json["stdout"] = output["stdout"]
+            output_json["stderr"] = output["stderr"]
+
+            return self.parse_output(output_json, input_model)
         else:
             print(output["stdout"])
-
             raise UnknownError(output["stderr"])
 
     def build_input(
         self, input_model: AtomicInput, config: TaskConfig, template: Optional[str] = None
     ) -> Dict[str, Any]:
+
         #
         madnessrec = {
             "infiles": {},
@@ -152,179 +172,92 @@ class MadnessHarness(ProgramHarness):
 
         ## These are the madness keywords
         opts = copy.deepcopy(input_model.keywords)
-        opts = {k.lower(): v for k, v in opts.items()}
-        print(opts)
+        print("opts1: ", opts)
 
+        print(input_model.keywords)
+
+        json_input = json.dumps(input_model.keywords, indent=4)
+        print("json input", json_input)
         # Handle Molecule
         molcmd, moldata = input_model.molecule.to_string(dtype="madness", units="bohr", return_data=True)
-        print(moldata)
-        print(molcmd)
-        molData = {}
-        for k, v in moldata["keywords"].items():
-            molData["dft__" + k] = v
-        opts.update(molData)
-
-        ## Handle Calc Type (ROBERT)
-        ## now returns respnse options as well
-        mdccmd, mdcopts = muster_modelchem(input_model.model.method, input_model.driver)
-        opts.update(mdcopts)
-        ## Handle the basis set (ROBERT) the question is what value of k
-
+        print("moldata", moldata)
+        print("molcmd", molcmd)
         # Log the job settings (LORI)  Not sure if i need this
         logger.debug("JOB_OPTS")
         logger.debug(pp.pformat(opts))
 
-        # Handle conversion from schema (flat key/value) keywords into local format
-        optcmd = format_keywords(opts)
-        # I need to split to geometry keywords and add it to the end of the geometry command in molcommand
-        # if the geometry keyword exits
-        if optcmd.find("geometry") != -1:
-            geo_index = optcmd.find("geometry")  # find first occurrence of geometry
-            end_index = optcmd[geo_index:].find("end")  # find first occurrence of end after geometry
-            geometry_input = optcmd[
-                geo_index + 8 : end_index + geo_index
-            ]  # grab everything in between geometry and end
-
-            optcmd = optcmd[0:geo_index] + optcmd[geo_index + end_index + 4 :]  # optcmd becomes everything else
-            molcmd = molcmd.replace(
-                "end", geometry_input.strip() + "\nend"
-            )  # replace end with the added geometry input
-            # print("optcmd\n", optcmd)
-            # print("molcmd\n", molcmd)
-
-        # print(optcmd.find("geometry"))
-        # print(optcmd)
-        madnessrec["commands"] = {}
-        if mdccmd == "response":
-            dft_cmds = optcmd.split(mdccmd)
-            dft_cmds[1] = "response\n" + dft_cmds[1]
-
-            madnessrec["infiles"]["moldft"] = {}
-            madnessrec["infiles"]["moldft"]["input"] = dft_cmds[0] + molcmd
-            madnessrec["infiles"]["molresponse"] = {}
-            madnessrec["infiles"]["molresponse"]["rinput"] = dft_cmds[1]
-            madnessrec["commands"]["moldft"] = [which("moldft")]
-            madnessrec["commands"]["molresponse"] = [which("molresponse")]
-        else:
-            dft_cmds = optcmd
-            madnessrec["infiles"]["moldft"] = {}
-            madnessrec["infiles"]["moldft"]["input"] = dft_cmds + molcmd
-            madnessrec["commands"]["moldft"] = [which("moldft")]
-
-        # print(madnessrec)
+        madnessrec["infiles"]["input.json"] = json_input
+        madnessrec["infiles"]["mol_input"] = molcmd
+        madnessrec["commands"] = [which("mad-dft"), "input.json", "mol_input"]
         # optcmd="dft\n xc hf \nend\n"
         # print(madnessrec["infiles"]["input"])
         return madnessrec
 
-    def execute(
-        self, inputs: Dict[str, Any], *, extra_outfiles=None, extra_commands=None, scratch_name=None, timeout=None
-    ) -> Tuple[bool, Dict]:
-        num_commands = len(inputs["commands"])
-        oexe = {}
-        if num_commands == 2:
-            success, dexe = execute(
-                inputs["commands"]["moldft"],
-                inputs["infiles"]["moldft"],
-                ["calc_info.json", "scf_info.json"],
-                scratch_exist_ok=True,
-                scratch_name=inputs.get("scratch_name", None),
-                scratch_directory=inputs["scratch_directory"],
-                scratch_messy=True,
-            )
-            oexe["moldft"] = dexe
-            success, dexe_response = execute(
-                inputs["commands"]["molresponse"],
-                inputs["infiles"]["molresponse"],
-                ["response_base.json"],
-                scratch_messy=True,
-                scratch_name=Path(dexe["scratch_directory"]).name,
-                scratch_exist_ok=True,
-            )
-            oexe["molresponse"] = dexe_response
-            # print(dexe)
-            # print(dexe_response)
-            return success, oexe
-        else:
-            # print(inputs["commands"]["moldft"])
-            success, dexe = execute(
-                inputs["commands"]["moldft"],
-                inputs["infiles"]["moldft"],
-                ["calc_info.json", "scf_info.json"],
-                scratch_exist_ok=True,
-                scratch_name=inputs.get("scratch_name", None),
-                scratch_directory=inputs["scratch_directory"],
-                scratch_messy=True,
-            )
-            oexe["moldft"] = dexe
-            return success, oexe
+    def parse_output(self, output_json: Dict, input_model: "AtomicInput") -> "AtomicResult":
 
-    def parse_output(self, outfiles, input_model: "AtomicInput") -> "AtomicResult":  # lgtm: [py/similar-function]
+        madmol = input_model.molecule  # qcprops = extract_formatted_properties(output_json)
 
-        qcvars, madhess, madgrad, madmol, version, errorTMP = harvest(input_model.molecule, outfiles)
+        print("output_json keys", output_json.keys())
 
-        moldft_out = outfiles.pop("moldft")
+        outfiles = {}
+        outfiles["moldft"] = output_json["moldft"]
+        outfiles["response"] = output_json.get("response", None)
 
-        print(moldft_out["outfiles"].keys())
+        scf_info = harvest_scf_info(output_json["moldft"]["scf_info"])
+        print("scf_info", scf_info)
+        calcinfo = harvest_calc_info(output_json["moldft"]["calc_info"])
+        print("calcinfo", calcinfo)
 
-        m_stdout = moldft_out.pop("stdout")
-        m_stderr = moldft_out.pop("stderr")
-        print("after pop", moldft_out["outfiles"].keys())
+        qcvars = {**scf_info, **calcinfo}
+        print("qcvars", qcvars)
 
-        response_out = None
-        r_stdout = None
-        r_stderr = None
-        if "molresponse" in outfiles.keys():
-            response_out = outfiles.pop("molresponse")
-            r_stdout = response_out.pop("stdout")
-            r_stderr = response_out.pop("stderr")
+        properties = {k.lower(): v for k, v in qcvars.items()}
+        native_files = {}
+        native_files["calc_info.json"] = json.dumps(outfiles["moldft"]["calc_info"])
+        native_files["scf_info.json"] = json.dumps(outfiles["moldft"]["scf_info"])
+        if outfiles["response"] is not None:
+            native_files["response"] = {}
+            for response_key in outfiles["response"].keys():
+                native_files["response"][response_key] = json.dumps(outfiles["response"][response_key])
+        print("native_files", native_files.keys())
+        print("native files response keys", native_files["response"].keys())
 
-        stdout = m_stdout
-        if r_stdout is not None:
-            stdout.update(r_stdout)
+        provenance = Provenance(creator="madness", version=self.get_version(), routine="madness")
 
-        if madgrad is not None:
-            qcvars["CURRENT GRADIENT"] = madgrad
+        def get_return_results(input_model, qcvars):
+            if input_model.driver == "energy":
+                retres = qcvars["RETURN_ENERGY"]
+            elif input_model.driver == "gradient":
+                retres = qcvars[
+                    "CURRENT GRADIENT"
+                ]  # in madness I need to create a gradient and hession output json file
+            elif input_model.driver == "hessian":
+                retres = qcvars["CURRENT HESSIAN"]
+            else:
+                raise InputError("Driver not understood")
+            return retres
 
-        if madhess is not None:
-            qcvars["CURRENT HESSIAN"] = madhess
-        # Normalize the output as a float or list of floats
-        if input_model.driver.upper() == "PROPERTIES":
-            retres = qcvars[f"RETURN_ENERGY"]
-        else:
-            retres = qcvars["RETURN_ENERGY"]
+        retres = get_return_results(input_model, qcvars)
+        stdout = output_json.pop("stdout")
+        stderr = output_json.pop("stderr")
 
-        if isinstance(retres, Decimal):
-            retres = float(retres)
-        elif isinstance(retres, np.ndarray):
-            retres = retres.tolist()
-
-        # Get the formatted properties
-        qcprops = extract_formatted_properties(qcvars)
         # Format them inout an output
-        m_native_files = {k: v for k, v in moldft_out["outfiles"].items() if v is not None}
-        native_files = {
-            "input": m_native_files["input"],
-            "calc_info": m_native_files["calc_info.json"],
-        }
         output_data = {
-            "schema_name": "qcschema_output",
             "schema_version": 1,
-            "extras": {"outfiles": outfiles, **input_model.extras},
+            "molecule": madmol,  # overwrites with outfile Cartesians in case fix_*=F
+            "extras": {**input_model.extras},
             "native_files": native_files,
-            "properties": qcprops,
-            "provenance": Provenance(creator="MADNESS", version=self.get_version(), routine="madness"),
+            "properties": properties,
+            "provenance": provenance,
             "return_result": retres,
+            "stderr": stderr,
             "stdout": stdout,
+            "success": True,
         }
         # got to even out who needs plump/flat/Decimal/float/ndarray/list
         # Decimal --> str preserves precision
         output_data["extras"]["qcvars"] = {
             k.upper(): str(v) if isinstance(v, Decimal) else v for k, v in qcel.util.unnp(qcvars, flat=True).items()
         }
-        output_data["extras"]["outfiles"] = {
-            "input": native_files["input"],
-            "calc_info": json.loads(native_files["calc_info"]),
-        }
 
-        output_data["success"] = True
         return AtomicResult(**{**input_model.dict(), **output_data})
