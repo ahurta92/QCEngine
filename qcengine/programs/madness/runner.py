@@ -20,7 +20,7 @@ from qcengine.exceptions import UnknownError
 from ...exceptions import InputError
 from ..model import ProgramHarness
 
-from .harvester import harvest_scf_info, harvest_calc_info
+from .harvester import harvest_scf_info, harvest_calc_info, harvest_response_properties
 from ...util import create_mpi_invocation, execute
 
 pp = pprint.PrettyPrinter(width=120, compact=True, indent=1)
@@ -259,5 +259,9 @@ class MadnessHarness(ProgramHarness):
         output_data["extras"]["qcvars"] = {
             k.upper(): str(v) if isinstance(v, Decimal) else v for k, v in qcel.util.unnp(qcvars, flat=True).items()
         }
+
+        output_data["extras"]["response_properties"] = harvest_response_properties(outfiles["response"])
+
+        output_data["extras"]["outfiles"] = native_files
 
         return AtomicResult(**{**input_model.dict(), **output_data})

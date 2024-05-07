@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+import pandas as pd
 
 # from decimal import Decimal
 from typing import Tuple
@@ -92,20 +93,31 @@ def read_excited_proto_iter_data(my_iter_data, num_states):
 
 
 # input response_info json and returns a dict of response paramters
-# and a list of dicts of numpy arrays holding response data
-def read_molrespone_json(response_info):
-    protocol_data = response_info["protocol_data"]
-    response_parameters = response_info["response_parameters"]
-    n_states = response_parameters["states"]
-    n_orbitals = response_parameters["num_orbitals"]
-    num_protos = len(protocol_data)
-    protos = []
-    proto_data = []
-    for p in range(num_protos):
-        protos.append(protocol_data[p]["proto"])
-        iter_data = protocol_data[p]["iter_data"]
-        if response_parameters["excited_state"]:
-            proto_data.append(read_excited_proto_iter_data(iter_data, n_states))
-        else:
-            proto_data.append(read_frequency_proto_iter_data(iter_data, n_states))
-    return response_parameters, proto_data
+
+
+def harvest_response_properties(response_base_files):
+    """Harvest the response information from the response JSON"""
+    psivar = PreservingDict()
+
+    print(response_base_files)
+
+    alphas = np.zeros((len(response_base_files), 10), dtype=np.float64)
+    i = 0
+    for file_name, rp in response_base_files.items():
+        print("file_name", file_name)
+        print("response_base", rp)
+        parameters = rp["parameters"]
+        data = rp["response_data"]["data"]
+        # make a 10,1 array of zeros
+        values = np.zeros((10,), dtype=np.float64)
+        values[0] = parameters["omega"]
+
+        alpha = data["alpha"]
+        alpha = tensor_to_numpy(alpha)
+        values[1:] = alpha[-1, :].reshape(9,)
+        alphas[i, :] = values[:]
+    # pandas dataframe
+
+    psivar["polarizability"] = np.array(alphas, dtype=np.float64)
+
+    return psivar
