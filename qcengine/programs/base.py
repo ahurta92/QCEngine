@@ -30,6 +30,7 @@ from .torchani import TorchANIHarness
 from .turbomole import TurbomoleHarness
 from .xtb import XTBHarness
 from .mace import MACEHarness
+from .aimnet2 import AIMNET2Harness
 
 __all__ = ["register_program", "get_program", "list_all_programs", "list_available_programs"]
 
@@ -129,6 +130,7 @@ register_program(XTBHarness())
 # AI
 register_program(TorchANIHarness())
 register_program(MACEHarness())
+register_program(AIMNET2Harness())
 
 # Molecular Mechanics
 register_program(RDKitHarness())

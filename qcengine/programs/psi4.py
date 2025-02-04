@@ -73,7 +73,7 @@ class Psi4Harness(ProgramHarness):
                         psiapi = which_import("psi4", return_bool=True)
 
         if psiapi and not psithon:
-            with popen(["python", "-c", "import psi4; print(psi4.executable)"]) as exc:
+            with popen([sys.executable, "-c", "import psi4; print(psi4.executable)"]) as exc:
                 exc["proc"].wait(timeout=30)
             so, se, rc = exc["stdout"].strip(), exc["stderr"], exc["proc"].returncode
             error_msg = f" In particular, psi4 module found but unable to load psi4 command into PATH. stdout: {so}, stderr: {se}"
@@ -92,7 +92,7 @@ class Psi4Harness(ProgramHarness):
             "psi4",
             return_bool=True,
             raise_error=raise_error,
-            raise_msg="Please install via `conda install psi4 -c conda-forge/label/libint_dev -c conda-forge`. Check it's in your PATH with `which psi4`."
+            raise_msg="Please install via `conda install psi4 -c conda-forge`. Check it's in your PATH with `which psi4`."
             + error_msg,
         )
 
