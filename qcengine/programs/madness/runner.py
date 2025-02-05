@@ -37,7 +37,7 @@ class MadnessHarness(ProgramHarness):
     _defaults = {
         "name": "madness",
         "scratch": True,
-        "thread_safe": True,
+        "thread_safe": False,
         "thread_parallel": True,
         "node_parallel": True,
         "managed_memory": True,
@@ -77,7 +77,7 @@ class MadnessHarness(ProgramHarness):
     def get_version(self) -> str:
         if self.found(raise_error=True):
             config = get_config()
-            which_prog = str(which("mad-dft"))
+            which_prog = str(which("madqc"))
             if config.use_mpiexec:
                 command = create_mpi_invocation(str(which_prog), config)
             else:
